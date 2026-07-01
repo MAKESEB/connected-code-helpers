@@ -13,6 +13,79 @@ This file documents what Connected Code can infer for each selected App in the A
 | `connection.sql.query(sql, params?)` | Available for SQL apps such as PostgreSQL/MySQL. User code passes only SQL and params; endpoint/auth stay in the Make connection. |
 | `connection.email.send/search/get(...)` | Available for Email broker apps. User code passes mail content/search inputs; SMTP/IMAP credentials stay in the Make connection. |
 
+## If you are an LLM writing Connected Code
+
+Use this checklist before writing code for a module. It is intentionally product-facing and uses only public module behavior.
+
+1. Read the selected App and Connection Type from the module UI/context.
+2. Use `input` for mapped business data only. Do not ask the user to map API tokens, passwords, database hosts, usernames, or connection strings into `input`.
+3. For HTTP/API apps, prefer `await connection.fetch(absoluteUrl, init?)`. It uses the selected Make connection or keychain through a scoped proxy.
+4. For SQL apps, use `await connection.sql.query(sql, params?)`. Pass query parameters as an array; never build a database connection string in code.
+5. For Email apps, use `connection.email.send(...)`, `connection.email.search(...)`, or `connection.email.get(...)`; do not pass SMTP/IMAP credentials in code.
+6. If a secret connection field must appear in a URL, query string, header, or text body, use `connection.template('fieldName')`. Do not write raw `{{connection.fieldName}}` in code.
+7. If the app says an accepted Base URL is required, every `connection.fetch(...)` URL must stay under that accepted prefix. Requests outside the scope fail closed.
+8. Always check `response.ok` before parsing. Throw errors with the HTTP status and a short response body preview.
+9. Return plain JSON-serializable data: objects, arrays, strings, numbers, booleans, or `null`.
+
+### Minimal HTTP pattern
+
+```js
+const response = await connection.fetch('https://api.example.com/v1/items', {
+  method: 'GET'
+});
+const text = await response.text();
+if (!response.ok) throw new Error(`Request failed ${response.status}: ${text.slice(0, 300)}`);
+return JSON.parse(text);
+```
+
+### Manual API-key or Bearer header pattern
+
+Most app-specific connections already know how to authenticate `connection.fetch(...)`. Use manual placement only when the target API expects the secret in a specific custom location.
+
+For an HTTP App with API Key Auth where the key should be sent as a raw custom header:
+
+```js
+const response = await connection.fetch('https://api.example.com/v1/items', {
+  headers: { 'x-api-key': connection.template('key') }
+});
+```
+
+For APIs that expect a Bearer token but the HTTP keychain stores only the raw key:
+
+```js
+const response = await connection.fetch('https://api.example.com/v1/models', {
+  headers: { authorization: 'Bearer ' + connection.template('key') }
+});
+```
+
+### Accepted Base URL pattern
+
+When an app uses a tenant/user domain, build the URL from the selected connection field and keep it under the accepted Base URL entered in the module.
+
+```js
+const baseUrl = connection.template('apiURL').replace(/\/$/, '');
+const response = await connection.fetch(`${baseUrl}/api/user/account/`);
+```
+
+### SQL pattern
+
+```js
+const result = await connection.sql.query(
+  'select $1::text as message',
+  ['hello']
+);
+return result.rows;
+```
+
+## Common mistakes to avoid
+
+- Do not ask for API keys, database credentials, SMTP credentials, or OAuth tokens as input variables.
+- Do not use `fetch(...)` directly for authenticated API calls; use `connection.fetch(...)`.
+- Do not use raw `{{connection.secret}}` templates in code; use `connection.template('secret')`.
+- Do not call URLs outside the selected app scope or accepted Base URL.
+- Do not assume every HTTP API uses a Bearer-style Authorization header; check the app or credential type and use manual headers only when needed.
+- Do not log or return secret-bearing URLs, headers, or rendered tokens.
+
 ## Scope model
 
 Connected Code never exposes raw credentials to code. The selected Make connection/keychain is rendered inside the proxy sandbox.
@@ -23,7 +96,7 @@ For tenant-hosted or user-domain apps, the module asks for an accepted Base URL.
 
 ## Apps that require an accepted Base URL
 
-| App | Label | Generated source/template |
+| App | Label | Allowed scope template |
 | --- | --- | --- |
 | wordpress | WordPress | {{connection.restRouteBase}}wp/v2 |
 | zendesk | Zendesk | https://{{ifempty(connection.subdomain, resolveDomain(connection.domain))}}.zendesk.com/ |
@@ -66,7 +139,7 @@ For the generic HTTP App, choose a Connection Type and then use `connection.fetc
 | `keychain:clientcertauth` | Client certificate / mTLS HTTP credential. |
 | `keychain:proxy` | HTTP proxy credential. |
 
-## Known `connection.*` fields referenced by generated policies
+## Known `connection.*` fields referenced by catalog policies
 
 | Field | Apps referencing it |
 | --- | --- |
