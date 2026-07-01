@@ -1,7 +1,5 @@
 # Connected Code connection reference
 
-Generated from `mono/libs/native-apps/connected-code/lib/connection-catalog.generated.json`.
-
 This file documents what Connected Code can infer for each selected App in the App dropdown.
 
 ## Runtime helpers
