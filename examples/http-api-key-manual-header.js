@@ -1,6 +1,7 @@
-// HTTP App with API Key Auth Connection, manual header placement.
-const response = await connection.fetch('https://api.example.com/v1/items', {
+// HTTP App with API Key Auth Connection and one extra non-secret header.
+// Prefer configuring API-key placement in the HTTP credential instead of reading secrets in code.
+const response = await connection.fetch('/items', {
   method: 'GET',
-  headers: { 'x-api-key': connection.template('key') }
+  headers: { 'x-extra-header': 'value' }
 });
 return { status: response.status, body: await response.text() };

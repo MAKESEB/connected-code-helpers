@@ -1,378 +1,234 @@
 # Connected Code connection reference
 
-This file documents what Connected Code can infer for each selected App in the App dropdown.
+This file documents how an LLM should write code for Make Connected Code with selected Apps and Make Connections.
 
 ## Runtime helpers
 
 | Helper | Use |
 | --- | --- |
-| `input` | Your mapped input variables. |
-| `connection.id` | Metadata id for the selected Make connection/keychain proxy handle. |
-| `connection.fetch(url, init?)` | Make an HTTP request through the scoped proxy. Secrets stay in the proxy sandbox. |
-| `connection.template('fieldName')` | Emit an inert placeholder that the proxy renders from the selected Make connection/keychain. Use this when a request needs a field in a URL/body/header. |
-| `connection.sql.query(sql, params?)` | Available for SQL apps such as PostgreSQL/MySQL. User code passes only SQL and params; endpoint/auth stay in the Make connection. |
-| `connection.email.send/search/get(...)` | Available for Email broker apps. User code passes mail content/search inputs; SMTP/IMAP credentials stay in the Make connection. |
+| `input` | Mapped business inputs only. Do not map secrets, tokens, passwords, hosts, or connection strings. |
+| `connection.id` | Metadata id for the selected Make connection/keychain handle. |
+| `connection.fetch(pathOrUrl, init?)` | Make an HTTP request through the scoped proxy. Prefer relative paths such as `/v1/models`; the selected App/Connection supplies base URL and auth. |
+| `connection.sql.query(sql, params?)` | SQL apps only. Pass SQL and params; endpoint/auth stay in the Make connection. |
+| `connection.email.send/search/get(...)` | Email apps only. Pass mail content/search inputs; SMTP/IMAP credentials stay in the Make connection. |
+| `connection.template(fieldName)` | Escape hatch for rare custom URL/header/body placement. Prefer not to use it; secrets still render only inside the proxy. |
 
 ## If you are an LLM writing Connected Code
 
-Use this checklist before writing code for a module. It is intentionally product-facing and uses only public module behavior.
+1. Use `input` only for business data.
+2. Use `connection.fetch(...)` for HTTP/API apps; never call global `fetch(...)` for authenticated app calls.
+3. Prefer relative paths: `connection.fetch('/items')`. Connected Code joins the path to the selected App request base and validates it stays inside the allowed proxy scope.
+4. Add query/body/headers through the second argument: `{ query, json, body, headers, method }`.
+5. Do not read or return raw connection secrets. User code receives a capability, not raw credential data.
+6. For SQL apps, use `connection.sql.query(sql, params?)`.
+7. For Email apps, use `connection.email.*`.
+8. Always check `response.ok` before parsing HTTP responses.
+9. Return JSON-serializable data.
 
-1. Read the selected App and Connection Type from the module UI/context.
-2. Use `input` for mapped business data only. Do not ask the user to map API tokens, passwords, database hosts, usernames, or connection strings into `input`.
-3. For HTTP/API apps, prefer `await connection.fetch(absoluteUrl, init?)`. It uses the selected Make connection or keychain through a scoped proxy.
-4. For SQL apps, use `await connection.sql.query(sql, params?)`. Pass query parameters as an array; never build a database connection string in code.
-5. For Email apps, use `connection.email.send(...)`, `connection.email.search(...)`, or `connection.email.get(...)`; do not pass SMTP/IMAP credentials in code.
-6. If a secret connection field must appear in a URL, query string, header, or text body, use `connection.template('fieldName')`. Do not write raw `{{connection.fieldName}}` in code.
-7. If the app says an accepted Base URL is required, every `connection.fetch(...)` URL must stay under that accepted prefix. Requests outside the scope fail closed.
-8. Always check `response.ok` before parsing. Throw errors with the HTTP status and a short response body preview.
-9. Return plain JSON-serializable data: objects, arrays, strings, numbers, booleans, or `null`.
-
-### Minimal HTTP pattern
+### Standard HTTP/API pattern
 
 ```js
-const response = await connection.fetch('https://api.example.com/v1/items', {
-  method: 'GET'
+const response = await connection.fetch('/v1/items', {
+  method: 'GET',
+  query: { limit: 10 }
 });
 const text = await response.text();
 if (!response.ok) throw new Error(`Request failed ${response.status}: ${text.slice(0, 300)}`);
 return JSON.parse(text);
 ```
 
-### Manual API-key or Bearer header pattern
-
-Most app-specific connections already know how to authenticate `connection.fetch(...)`. Use manual placement only when the target API expects the secret in a specific custom location.
-
-For an HTTP App with API Key Auth where the key should be sent as a raw custom header:
+### POST JSON pattern
 
 ```js
-const response = await connection.fetch('https://api.example.com/v1/items', {
-  headers: { 'x-api-key': connection.template('key') }
+const response = await connection.fetch('/v1/items', {
+  method: 'POST',
+  headers: { 'x-extra-header': 'value' },
+  json: { name: input.name }
 });
-```
-
-For APIs that expect a Bearer token but the HTTP keychain stores only the raw key:
-
-```js
-const response = await connection.fetch('https://api.example.com/v1/models', {
-  headers: { authorization: 'Bearer ' + connection.template('key') }
-});
-```
-
-### Accepted Base URL pattern
-
-When an app uses a tenant/user domain, build the URL from the selected connection field and keep it under the accepted Base URL entered in the module.
-
-```js
-const baseUrl = connection.template('apiURL').replace(/\/$/, '');
-const response = await connection.fetch(`${baseUrl}/api/user/account/`);
+if (!response.ok) throw new Error(`Request failed ${response.status}: ${await response.text()}`);
+return response.json();
 ```
 
 ### SQL pattern
 
 ```js
-const result = await connection.sql.query(
-  'select $1::text as message',
-  ['hello']
-);
+const result = await connection.sql.query('select $1::text as message', ['hello']);
 return result.rows;
 ```
 
-## Common mistakes to avoid
-
-- Do not ask for API keys, database credentials, SMTP credentials, or OAuth tokens as input variables.
-- Do not use `fetch(...)` directly for authenticated API calls; use `connection.fetch(...)`.
-- Do not use raw `{{connection.secret}}` templates in code; use `connection.template('secret')`.
-- Do not call URLs outside the selected app scope or accepted Base URL.
-- Do not assume every HTTP API uses a Bearer-style Authorization header; check the app or credential type and use manual headers only when needed.
-- Do not log or return secret-bearing URLs, headers, or rendered tokens.
-
 ## Scope model
 
-Connected Code never exposes raw credentials to code. The selected Make connection/keychain is rendered inside the proxy sandbox.
-
-For fixed vendor APIs, the generated catalog supplies the allowed upstream scope.
-
-For tenant-hosted or user-domain apps, the module asks for an accepted Base URL. `connection.fetch(...)` is allowed only under that accepted prefix and fails closed outside it.
-
-## Apps that require an accepted Base URL
-
-| App | Label | Allowed scope template |
-| --- | --- | --- |
-| wordpress | WordPress | {{connection.restRouteBase}}wp/v2 |
-| zendesk | Zendesk | https://{{ifempty(connection.subdomain, resolveDomain(connection.domain))}}.zendesk.com/ |
-| shopify | Shopify | https://{{connection.domain}}.myshopify.com/admin/api/2026-01/graphql.json |
-| pdf-co | PDF.co | https://{{ifempty(connection.baseUrl, 'api.pdf.co/v1')}} |
-| woocommerce | WooCommerce | {{getDomain(connection.domain)}}wp-json/wc/v3/ |
-| pipedrive | Pipedrive CRM | {{getApiURL(connection.accessToken, connection.customDomain, connection.apiDomain)}} |
-| jotform | Jotform | https://{{if(connection.enterpriseDomain === undefined, if(connection.hipaa === true,'hipaa-api.jotform.com' , 'eu-api.jotform.com'), connection.enterpriseDomain + '/API')}}, {{getUrlParamaterForUniversalModule(connection.enterpriseDomain, connection.hipaa)}} |
-| fillout | Fillout Forms | {{connection.agentBaseUrl}}/v1/api |
-| supabase | Supabase | https://{{connection.projectId}}.supabase.co |
-| mailchimp | Mailchimp | {{connection.apiEndpoint}}/3.0 |
-| make | Make | {{connection.url}}/api/v2 |
-| activecampaign | ActiveCampaign | https://{{parseAccountName(ifempty(connection.accountName, connection.acAccountName))}}.{{ifempty(connection.domain, 'api-us1.com')}} |
-| microsoft-d365-bc | Microsoft Dynamics 365 Business Central | https://{{connection.baseUrl}}/{{connection.tenant}}/{{connection.environment}}/{{connection.endPoint}} |
-| microsoft-dynamics | Microsoft Dynamics 365 | {{connection.host}} |
-| microsoft-dynamics-365-crm | Microsoft Dynamics 365 - CRM | {{connection.host}}/api/data/v9.2 |
-| microsoft-dynamics-365-fno | Microsoft Dynamics 365 Finance & Operations | {{connection.host}} |
-| microsoft-power-automate | Microsoft Power Automate | {{connection.environmentUrl}}/api/data/v9.2 |
-| airtop | Airtop | {{ if(connection.devMode; connection.baseUrl; 'https://api.airtop.ai/api/v1') }} |
-| baserow | Baserow | {{connection.apiURL}} |
-| salesforce | Salesforce | {{connection.instanceUrl}}/services/data/v66.0 |
-| teamwork | Teamwork | {{getConnectionUrl(connection.select, connection.domain, connection.customDomain)}} |
-| jira | Jira Cloud Platform | {{if(connection.cloudId, 'https://api.atlassian.com/ex/jira/' + connection.cloudId + '/rest/api/3', connection.url + '/rest/api/3')}} |
-| pinecone | Pinecone | https://{{connection.indexName}}.pinecone.io |
-| azure-openai | Azure OpenAI | {{if(connection.isApiKey, connection.baseUrl, connection.endpoints.`Base Endpoint`)}}/openai |
-| qdrant | Qdrant | {{connection.qdrantUrl}} |
-| gitlab | GitLab | https://{{ifempty(connection.domain, 'gitlab.com')}}/api/v4/ |
-| azure-ai-foundry | Azure AI Foundry | {{first(split(connection.AIservices,'cognitiveservices.'))}} |
+- Connected Code never exposes raw credentials to user code.
+- The selected Make connection/keychain is available only in the proxy sandbox.
+- Service Apps derive request bases and allowed scopes from the generated catalog and selected connection data.
+- HTTP App is the only app that asks for an explicit `HTTP Base URL`.
+- PostgreSQL, MySQL, and Email use native broker helpers instead of HTTP proxy scopes.
+- Requests outside the selected App scope fail closed.
 
 ## HTTP credential connection types
 
-For the generic HTTP App, choose a Connection Type and then use `connection.fetch(...)` against the required HTTP Base URL scope.
-
 | Connection Type | Typical use |
 | --- | --- |
-| `account:oauth2` | OAuth 2 HTTP connection. Use `connection.fetch(...)`; use `connection.template('accessToken')` only when building a custom header/body manually. |
-| `keychain:apikeyauth` | API key HTTP credential. Use `connection.fetch(...)`; use `connection.template('key')` or the configured key field if you must manually place it. |
+| `account:oauth2` | OAuth 2 HTTP connection. Set HTTP Base URL in the module UI, then call relative paths. |
+| `keychain:apikeyauth` | API key HTTP credential. Set HTTP Base URL in the module UI. |
 | `keychain:basicauth` | Basic auth HTTP credential. |
 | `keychain:cacert` | CA certificate HTTP credential. |
 | `keychain:clientcertauth` | Client certificate / mTLS HTTP credential. |
 | `keychain:proxy` | HTTP proxy credential. |
 
-## Known `connection.*` fields referenced by catalog policies
-
-| Field | Apps referencing it |
-| --- | --- |
-| connection.AIservices | azure-ai-foundry |
-| connection.Organization | stability-ai |
-| connection.acAccountName | activecampaign |
-| connection.accessToken | google-sheets, google-email, google-drive, airtable, notion, google-docs, google-calendar, slack, instagram-business, pinterest, google-forms, facebook-lead-ads… |
-| connection.accessToken2 | quickbooks |
-| connection.accountName | activecampaign |
-| connection.agentBaseUrl | fillout |
-| connection.apiDomain | pipedrive |
-| connection.apiEndpoint | mailchimp |
-| connection.apiKey | openai-gpt-3, notion, wordpress, tally, anthropic-claude, perplexity-ai, monday, pdf-co, sendinblue, pipedrive, open-router, elevenlabs… |
-| connection.apiOrg | openai-gpt-3 |
-| connection.apiSecret | cloudinary |
-| connection.apiToken | airtable, baserow, toggl |
-| connection.apiURL | baserow |
-| connection.apiVersion | intunes |
-| connection.authToken | twilio |
-| connection.azureOpenAiKey | azure-openai |
-| connection.baseUrl | pdf-co, microsoft-d365-bc, airtop, azure-openai |
-| connection.botToken | discord |
-| connection.client-token | z-api |
-| connection.clientId | google-ads, google-ads-campaign-management, google-ads-conversions, google-ads-customer-match, google-ads-lead-forms, google-ads-reports |
-| connection.cloudId | jira |
-| connection.cloudName | cloudinary |
-| connection.cloudid | confluence |
-| connection.customDomain | pipedrive, teamwork |
-| connection.customerId | google-ads, google-ads-campaign-management, google-ads-conversions, google-ads-customer-match, google-ads-lead-forms, google-ads-reports, microsoft-ad-campaign-mgmt |
-| connection.devMode | airtop |
-| connection.developerApplication | linkedin |
-| connection.developerToken | google-ads, google-ads-campaign-management, google-ads-conversions, google-ads-customer-match, google-ads-lead-forms, google-ads-reports, microsoft-ad-campaign-mgmt |
-| connection.domain | zendesk, shopify, woocommerce, activecampaign, teamwork, gitlab |
-| connection.endPoint | microsoft-d365-bc |
-| connection.endpoints | azure-openai |
-| connection.enterpriseDomain | jotform |
-| connection.environment | microsoft-d365-bc, assembly-ai |
-| connection.environmentUrl | microsoft-power-automate |
-| connection.hipaa | jotform |
-| connection.host | microsoft-dynamics, microsoft-dynamics-365-crm, microsoft-dynamics-365-fno |
-| connection.id | linkedin |
-| connection.indexName | pinecone |
-| connection.instanceId | z-api |
-| connection.instanceUrl | salesforce |
-| connection.isApiKey | azure-openai |
-| connection.key | gemini-ai, stripe |
-| connection.password | wordpress, jira, dataforseo |
-| connection.privateToken | gitlab |
-| connection.projectId | supabase |
-| connection.qdrantUrl | qdrant |
-| connection.realmId | quickbooks |
-| connection.refreshTokenExpires | google-email |
-| connection.region | openai-gpt-3, twilio, typeform, elevenlabs |
-| connection.restRouteBase | wordpress |
-| connection.rk | stripe |
-| connection.root_namespace_id | dropbox |
-| connection.sandbox | pinterest, quickbooks |
-| connection.sandboxToken | pinterest |
-| connection.schema | supabase |
-| connection.select | teamwork |
-| connection.sid | twilio |
-| connection.subdomain | zendesk |
-| connection.tenant | microsoft-d365-bc |
-| connection.token | telegram, z-api |
-| connection.tokenId | z-api |
-| connection.url | make, jira |
-| connection.userId | microsoft-email |
-| connection.username | wordpress, jira, dataforseo |
-
 ## App catalog
 
-| App | Label | Connection types | User scope requirement | Referenced connection fields | Helpers | Scope/source |
-| --- | --- | --- | --- | --- | --- | --- |
-| google-sheets | Google Sheets | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://sheets.googleapis.com/v4/ |
-| openai-gpt-3 | OpenAI (ChatGPT, Sora, Whisper) | account:openai-gpt-3 | No extra user scope | apiKey, apiOrg, region | connection.fetch(url, init?), connection.template(fieldName) | https://{{temp.region}}api.openai.com/v1 |
-| http | HTTP App | account:oauth2, keychain:apikeyauth, keychain:basicauth, keychain:cacert, keychain:clientcertauth, keychain:proxy | HTTP Base URL required | — | connection.fetch(url, init?), connection.template(fieldName) | HTTP Base URL |
-| google-email | Gmail | account:google-email | No extra user scope | accessToken, refreshTokenExpires | connection.fetch(url, init?), connection.template(fieldName) | https://gmail.googleapis.com/gmail/v1/users/me/ |
-| telegram | Telegram Bot | account:telegram | No extra user scope | token | connection.fetch(url, init?), connection.template(fieldName) | https://api.telegram.org/bot{{connection.token}}/ |
-| google-drive | Google Drive | account:google-custom, account:google-drive, account:google-restricted, account:google-restricted,google-drive | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/drive/v3/ |
-| airtable | Airtable | account:airtable2, account:airtable3, account:airtable3,airtable2 | No extra user scope | accessToken, apiToken | connection.fetch(url, init?), connection.template(fieldName) | {{getBaseUrl(connection, 'api.airtable.com/v0')}} |
-| email | Email | account:imap, account:smtp | No extra user scope | — | connection.email.send/search/get | — |
-| notion | Notion | account:notion2, account:notion2,notion3, account:notion3 | No extra user scope | accessToken, apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.notion.com/v1/ |
-| google-docs | Google Docs | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://docs.googleapis.com/v1/ |
-| gemini-ai | Google Gemini AI | account:gemini-ai-q9zyjp | No extra user scope | key | connection.fetch(url, init?), connection.template(fieldName) | https://generativelanguage.googleapis.com/v1beta/ |
-| google-calendar | Google Calendar | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/calendar/v3/ |
-| slack | Slack | account:slack2, account:slack2,slack3, account:slack3 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | {{ifempty(parameters.domain, 'https://slack.com/api/')}} |
-| instagram-business | Instagram for Business (Facebook login) | account:facebook | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.facebook.com/v25.0/ |
-| facebook-pages | Facebook Pages | account:facebook | No extra user scope | — | connection.fetch(url, init?), connection.template(fieldName) | https://graph.facebook.com/v25.0/ |
-| pinterest | Pinterest | account:pinterest2 | No extra user scope | accessToken, sandbox, sandboxToken | connection.fetch(url, init?), connection.template(fieldName) | https://api{{if(connection.sandbox, '-sandbox', '')}}.pinterest.com/v5 |
-| google-forms | Google Forms | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://forms.googleapis.com/v1/ |
-| facebook-lead-ads | Facebook Lead Ads | account:facebook | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.facebook.com/v25.0/ |
-| linkedin | LinkedIn | account:linkedin-openid, account:linkedin2, account:linkedin2,linkedin-openid | No extra user scope | accessToken, developerApplication, id | connection.fetch(url, init?), connection.template(fieldName) | https://api.linkedin.com/rest/ |
-| microsoft-email | Microsoft 365 Email (Outlook) | account:azure, account:microsoft-smtp-imap | No extra user scope | accessToken, userId | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| whatsapp-business-cloud | WhatsApp Business Cloud | account:whatsapp-business-cloud, account:whatsapp-business-cloud,whatsapp-business-cloud2, account:whatsapp-business-cloud2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.facebook.com/v25.0/ |
-| wordpress | WordPress | account:wordpress4 | Accepted Base URL required | apiKey, password, restRouteBase, username | connection.fetch(url, init?), connection.template(fieldName) | {{connection.restRouteBase}}wp/v2 |
-| youtube | YouTube | account:youtube | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/youtube/v3/ |
-| tally | Tally | account:tally, account:tally2 | No extra user scope | accessToken, apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.tally.so/ |
-| apify | Apify | account:apify, account:apify2, account:apify2,apify | No extra user scope | — | connection.fetch(url, init?), connection.template(fieldName) | https://api.apify.com/v2/ |
-| anthropic-claude | Anthropic Claude | account:anthropic-claude | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.anthropic.com/v1/ |
-| perplexity-ai | Perplexity AI | account:perplexity-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.perplexity.ai/ |
-| dropbox | Dropbox | account:dropbox | No extra user scope | accessToken, root_namespace_id | connection.fetch(url, init?), connection.template(fieldName) | https://api.dropboxapi.com/2/ |
-| discord | Discord | account:discord | No extra user scope | botToken | connection.fetch(url, init?), connection.template(fieldName) | https://discord.com/api/v10/ |
-| line | LINE | account:line, account:line2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.line.me/v2/bot/ |
-| hubspotcrm | HubSpot CRM | account:hubspotcrm, account:hubspotcrm3 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.hubapi.com/ |
-| zendesk | Zendesk | account:zendesk, account:zendesk4, account:zendesk4,zendesk | Accepted Base URL required | accessToken, domain, subdomain | connection.fetch(url, init?), connection.template(fieldName) | https://{{ifempty(connection.subdomain, resolveDomain(connection.domain))}}.zendesk.com/ |
-| shopify | Shopify | account:shopify, account:shopify,shopify4, account:shopify4 | Accepted Base URL required | accessToken, domain | connection.fetch(url, init?), connection.template(fieldName) | https://{{connection.domain}}.myshopify.com/admin/api/2026-01/graphql.json |
-| microsoft-excel | Microsoft 365 Excel | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| clickup | ClickUp | account:clickup, account:clickup2, account:clickup2,clickup | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.clickup.com/api/v2/ |
-| monday | monday.com | account:monday | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.monday.com/ |
-| trello | Trello | account:trello | No extra user scope | — | connection.fetch(url, init?), connection.template(fieldName) | https://api.trello.com/1/ |
-| twilio | Twilio | account:twilio | No extra user scope | authToken, region, sid | connection.fetch(url, init?), connection.template(fieldName) | https://api{{ifempty(connection.region, '.')}}twilio.com/2010-04-01/Accounts/{{connection.sid}} |
-| pdf-co | PDF.co | account:pdf-co | Accepted Base URL required | apiKey, baseUrl | connection.fetch(url, init?), connection.template(fieldName) | https://{{ifempty(connection.baseUrl, 'api.pdf.co/v1')}} |
-| stripe | Stripe | account:stripe, account:stripe,stripe2, account:stripe2 | No extra user scope | accessToken, key, rk | connection.fetch(url, init?), connection.template(fieldName) | https://api.stripe.com/v1/ |
-| onedrive | OneDrive | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| canva | Canva | account:canva | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.canva.com/rest/v1/ |
-| calendly | Calendly | account:calendly2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.calendly.com/ |
-| woocommerce | WooCommerce | account:woocommerce2 | Accepted Base URL required | domain | connection.fetch(url, init?), connection.template(fieldName) | {{getDomain(connection.domain)}}wp-json/wc/v3/ |
-| sendinblue | Brevo | account:sendinblue, account:sendinblue2, account:sendinblue2,sendinblue | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.sendinblue.com/v3/ |
-| highlevel | GoHighLevel | account:highlevel, account:highlevel,highlevel2, account:highlevel,highlevel3, account:highlevel2, account:highlevel2,highlevel4, account:highlevel3, account:highlevel3,highlevel4, account:highlevel4, account:highlevel5 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://{{if(connection.accessToken, 'services.leadconnectorhq.com', 'rest.gohighlevel.com/v1')}} |
-| webflow | Webflow | account:webflow2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.webflow.com/beta/ |
-| typeform | Typeform | account:typeform2 | No extra user scope | accessToken, region | connection.fetch(url, init?), connection.template(fieldName) | https://{{switch(connection.region, 'us', 'api.typeform.com', 'eu', 'api.eu.typeform.com', 'eu_new', 'api.typeform.eu', 'api.typeform.com')}} |
-| pipedrive | Pipedrive CRM | account:pipedrive-apikey, account:pipedrive-apikey,pipedrive-auth, account:pipedrive-auth, account:pipedrive-auth,pipedrive-apikey | Accepted Base URL required | accessToken, apiDomain, apiKey, customDomain | connection.fetch(url, init?), connection.template(fieldName) | {{getApiURL(connection.accessToken, connection.customDomain, connection.apiDomain)}} |
-| manychat | Manychat | account:manychat | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.manychat.com/ |
-| open-router | OpenRouter | account:open-router-4ur2vj, account:open-router3, account:open-router3,open-router-4ur2vj | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://openrouter.ai/api/v1/ |
-| jotform | Jotform | account:jotform | Accepted Base URL required | enterpriseDomain, hipaa | connection.fetch(url, init?), connection.template(fieldName) | https://{{if(connection.enterpriseDomain === undefined, if(connection.hipaa === true,'hipaa-api.jotform.com' , 'eu-api.jotform.com'), connection.enterpriseDomain + '/API')}}, {{getUrlParamaterForUniversalModule(connection.enterpriseDomain, connection.hipaa)}} |
-| fillout | Fillout Forms | account:fillout | Accepted Base URL required | accessToken, agentBaseUrl | connection.fetch(url, init?), connection.template(fieldName) | {{connection.agentBaseUrl}}/v1/api |
-| elevenlabs | ElevenLabs | account:elevenlabs | No extra user scope | apiKey, region | connection.fetch(url, init?), connection.template(fieldName) | {{ifempty(connection.region, 'https://api.elevenlabs.io')}}/v1 |
-| browse-ai | Browse AI | account:browse-ai | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.browse.ai/v2/ |
-| supabase | Supabase | account:supabase | Accepted Base URL required | apiKey, projectId, schema | connection.fetch(url, init?), connection.template(fieldName) | https://{{connection.projectId}}.supabase.co |
-| mailchimp | Mailchimp | account:mailchimp, account:mailchimp2, account:mailchimp2,mailchimp | Accepted Base URL required | accessToken, apiEndpoint | connection.fetch(url, init?), connection.template(fieldName) | {{connection.apiEndpoint}}/3.0 |
-| google-slides | Google Slides | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://slides.googleapis.com/v1/ |
-| cloudconvert | CloudConvert | account:cloudconvert2, account:cloudconvert3, account:cloudconvert3,cloudconvert2 | No extra user scope | accessToken, apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.cloudconvert.com/v2/ |
-| asana | Asana | account:asana | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://app.asana.com/api/1.0/ |
-| groq | Groq | account:groq | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.groq.com/ |
-| coda | Coda | account:coda | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://coda.io/apis/v1/ |
-| make | Make | account:make, account:make2, account:make2,make | Accepted Base URL required | accessToken, apiKey, url | connection.fetch(url, init?), connection.template(fieldName) | {{connection.url}}/api/v2 |
-| facebook-insights | Facebook Insights | account:facebook | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.facebook.com/v25.0/ |
-| google-contacts | Google Contacts | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://people.googleapis.com/v1/ |
-| activecampaign | ActiveCampaign | account:activecampaign | Accepted Base URL required | acAccountName, accountName, apiKey, domain | connection.fetch(url, init?), connection.template(fieldName) | https://{{parseAccountName(ifempty(connection.accountName, connection.acAccountName))}}.{{ifempty(connection.domain, 'api-us1.com')}} |
-| facebook-messenger | Facebook Messenger | account:facebook-messenger2 | No extra user scope | — | connection.fetch(url, init?), connection.template(fieldName) | https://graph.facebook.com/v25.0/ |
-| todoist | Todoist | account:todoist3 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.todoist.com/api/v1/ |
-| google-tasks | Google Tasks | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/tasks/v1/ |
-| z-api | Z-API | account:z-api | No extra user scope | client-token, instanceId, token, tokenId | connection.fetch(url, init?), connection.template(fieldName) | https://api.z-api.io/instances/ |
-| deepseek-ai | DeepSeek AI | account:deepseek-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.deepseek.com/ |
-| mailerlite2 | MailerLite | account:mailerlite2 | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://connect.mailerlite.com/api/ |
-| firecrawl | Firecrawl | account:firecrawl | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.firecrawl.dev/v2/ |
-| inoreader | Inoreader | account:inoreader | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.inoreader.com/reader/api/0/ |
-| microsoft-calendar | Microsoft 365 Calendar | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| cloudinary | Cloudinary | account:cloudinary | No extra user scope | apiKey, apiSecret, cloudName | connection.fetch(url, init?), connection.template(fieldName) | https://api.cloudinary.com/v1_1/{{connection.cloudName}} |
-| active-directory | Microsoft Entra ID | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| google-ads | Google Ads (Deprecated) | account:google-ads | No extra user scope | accessToken, clientId, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://googleads.googleapis.com/v8/ |
-| google-ads-campaign-management | Google Ads Campaign Management | account:google-ads2 | No extra user scope | accessToken, clientId, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://googleads.googleapis.com/{{ifempty(parameters._version, 'v22')}} |
-| google-ads-conversions | Google Ads Conversions | account:google-ads2 | No extra user scope | accessToken, clientId, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://googleads.googleapis.com/v22/ |
-| google-ads-customer-match | Google Ads Customer Match | account:google-ads2 | No extra user scope | accessToken, clientId, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://googleads.googleapis.com/v22/ |
-| google-ads-lead-forms | Google Ads Lead Forms | account:google-ads2 | No extra user scope | accessToken, clientId, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://googleads.googleapis.com/v22/ |
-| google-ads-reports | Google Ads Reports | account:google-ads2 | No extra user scope | accessToken, clientId, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://googleads.googleapis.com/v22/ |
-| google-analytics | Google Analytics (Deprecated) | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://analyticsreporting.googleapis.com/v4/ |
-| google-analytics-4 | Google Analytics 4 | account:google-analytics-4 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://analyticsdata.googleapis.com/v1beta/ |
-| google-bigquery | BigQuery | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://bigquery.googleapis.com/bigquery/v2/ |
-| google-chat | Google Chat | account:google-chat3 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://chat.googleapis.com/v1/ |
-| google-cloud-dialogflow | Google Cloud Dialogflow ES | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://dialogflow.googleapis.com/v2/ |
-| google-cloud-firestore | Google Cloud Firestore | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://firestore.googleapis.com/v1/ |
-| google-cloud-pubsub | Google Cloud Pub/Sub | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://pubsub.googleapis.com/v1/ |
-| google-cloud-speech | Google Cloud Speech | account:google-cloud-speech | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://speech.googleapis.com/v1p1beta1/ |
-| google-cloud-storage | Google Cloud Storage | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/storage/v1/ |
-| google-cloud-storage-transfer | Google Cloud Storage Transfer Service | account:google-cloud-storage-transfer2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://storagetransfer.googleapis.com/v1/ |
-| google-cloud-tts | Google Cloud Text-to-Speech | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://texttospeech.googleapis.com/v1/ |
-| google-data-studio | Looker Studio | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://datastudio.googleapis.com/v1/ |
-| google-g-suite | Google Workspace Admin | account:google, account:google,google-custom, account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/ |
-| google-groups | Google Groups | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/admin/directory/v1/ |
-| google-keep | Google Keep | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://keep.googleapis.com/v1/ |
-| google-maps | Google Maps | account:google-maps | No extra user scope | — | connection.fetch(url, init?), connection.template(fieldName) | https://maps.googleapis.com/maps/api/ |
-| google-meet | Google Meet | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/calendar/v3/ |
-| google-my-business | Google Business Profile | account:google-custom, account:google-custom,google-my-business2, account:google-my-business2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://mybusiness.googleapis.com/v4/ |
-| google-natural-language | Google Natural Language | account:google-custom | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://language.googleapis.com/v1/ |
-| google-photos | Google Photos | account:google-photos2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://photoslibrary.googleapis.com/v1/ |
-| google-search-console | Google Search Console | account:google-search-console | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/webmasters/v3/ |
-| google-shopping | Google Shopping | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/content/v2.1/ |
-| google-translate | Google Translate | account:google | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://www.googleapis.com/language/translate/v2/ |
-| google-vertex-ai | Google Vertex AI (Gemini) | account:google-vertex-ai | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://{{parameters.serviceEndpointLocationId}}-aiplatform.googleapis.com/v1 |
-| googlecloudvision | Google Cloud Vision | account:googlecloudvision | No extra user scope | — | connection.fetch(url, init?), connection.template(fieldName) | https://vision.googleapis.com/ |
-| intunes | Microsoft Intune | account:intunes | No extra user scope | accessToken, apiVersion | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/{{connection.apiVersion}} |
-| linear | Linear | account:linear | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.linear.app/ |
-| microsoft-ad-campaign-mgmt | Microsoft Advertising Campaign Management | account:microsoft-ad-campaign-mgmt | No extra user scope | accessToken, customerId, developerToken | connection.fetch(url, init?), connection.template(fieldName) | https://campaign.api.bingads.microsoft.com/CampaignManagement/v13/ |
-| microsoft-d365-bc | Microsoft Dynamics 365 Business Central | account:microsoft-d365-bc, account:microsoft-d365-bc,microsoft-d365-bc2, account:microsoft-d365-bc2 | Accepted Base URL required | accessToken, baseUrl, endPoint, environment, tenant | connection.fetch(url, init?), connection.template(fieldName) | https://{{connection.baseUrl}}/{{connection.tenant}}/{{connection.environment}}/{{connection.endPoint}} |
-| microsoft-dynamics | Microsoft Dynamics 365 | account:microsoft-dynamics | Accepted Base URL required | accessToken, host | connection.fetch(url, init?), connection.template(fieldName) | {{connection.host}} |
-| microsoft-dynamics-365-crm | Microsoft Dynamics 365 - CRM | account:microsoft-dynamics-365-crm | Accepted Base URL required | accessToken, host | connection.fetch(url, init?), connection.template(fieldName) | {{connection.host}}/api/data/v9.2 |
-| microsoft-dynamics-365-fno | Microsoft Dynamics 365 Finance & Operations | account:microsoft-dynamics-365-fno | Accepted Base URL required | accessToken, host | connection.fetch(url, init?), connection.template(fieldName) | {{connection.host}} |
-| microsoft-people | Microsoft 365 People | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| microsoft-planner | Microsoft 365 Planner | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| microsoft-power-automate | Microsoft Power Automate | account:microsoft-power-automate | Accepted Base URL required | accessToken, environmentUrl | connection.fetch(url, init?), connection.template(fieldName) | {{connection.environmentUrl}}/api/data/v9.2 |
-| microsoft-power-bi | Microsoft Power BI | account:microsoft-power-bi | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.powerbi.com/v1.0/ |
-| microsoft-sharepoint | Microsoft SharePoint Online | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| microsoft-teams | Microsoft Teams | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/v1.0/ |
-| microsoft-to-do | Microsoft To Do | account:azure | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://graph.microsoft.com/beta/ |
-| resend | Resend | account:resend | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.resend.com/ |
-| airtop | Airtop | account:airtop | Accepted Base URL required | apiKey, baseUrl, devMode | connection.fetch(url, init?), connection.template(fieldName) | {{ if(connection.devMode; connection.baseUrl; 'https://api.airtop.ai/api/v1') }} |
-| baserow | Baserow | account:baserow | Accepted Base URL required | apiToken, apiURL | connection.fetch(url, init?), connection.template(fieldName) | {{connection.apiURL}} |
-| cerebras-ai | Cerebras AI | account:cerebras-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.cerebras.ai/ |
-| edenaiv3 | Eden AI | account:edenaiv3 | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.edenai.run/v3/ |
-| fal-ai | Fal.ai | account:fal-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://queue.fal.run/fal-ai/ |
-| quickbooks | QuickBooks | account:quickbooks, account:quickbooks2, account:quickbooks2,quickbooks | No extra user scope | accessToken, accessToken2, realmId, sandbox | connection.fetch(url, init?), connection.template(fieldName) | https://{{if(connection.sandbox, 'sandbox-quickbooks', 'quickbooks')}}.api.intuit.com/v3/company/{{connection.realmId}} |
-| salesforce | Salesforce | account:salesforce, account:salesforce,salesforce2, account:salesforce2 | Accepted Base URL required | accessToken, instanceUrl | connection.fetch(url, init?), connection.template(fieldName) | {{connection.instanceUrl}}/services/data/v66.0 |
-| zohocrm | Zoho CRM | account:zohocrm2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | {{parseZohoUrl(connection)}}/crm/v3 |
-| mysql | MySQL | account:mysql | No extra user scope | — | connection.sql.query(sql, params?) | — |
-| postgres | PostgreSQL | account:postgres | No extra user scope | — | connection.sql.query(sql, params?) | — |
-| box | Box | account:box2 | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.box.com/2.0/ |
-| teamwork | Teamwork | account:teamwork2 | Accepted Base URL required | accessToken, customDomain, domain, select | connection.fetch(url, init?), connection.template(fieldName) | {{getConnectionUrl(connection.select, connection.domain, connection.customDomain)}} |
-| toggl | Toggl Track | account:toggl | No extra user scope | apiToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.track.toggl.com/api/v9/ |
-| reddit | reddit | account:reddit | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://oauth.reddit.com/ |
-| jira | Jira Cloud Platform | account:jira, account:jira-service-desk2 | Accepted Base URL required | accessToken, cloudId, password, url, username | connection.fetch(url, init?), connection.template(fieldName) | {{if(connection.cloudId, 'https://api.atlassian.com/ex/jira/' + connection.cloudId + '/rest/api/3', connection.url + '/rest/api/3')}} |
-| github | GitHub | account:github, account:github2, account:github2,github | No extra user scope | accessToken | connection.fetch(url, init?), connection.template(fieldName) | https://api.github.com/ |
-| mistral-ai | Mistral AI | account:mistral-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.mistral.ai/v1/ |
-| fireflies-ai | Fireflies.ai | account:fireflies-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.fireflies.ai/ |
-| leonardo-ai | Leonardo.Ai | account:leonardo-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://cloud.leonardo.ai/api/rest/v1/ |
-| assembly-ai | AssemblyAI | account:assembly-ai | No extra user scope | apiKey, environment | connection.fetch(url, init?), connection.template(fieldName) | https://{{connection.environment}}.assemblyai.com |
-| retell-ai | Retell AI | account:retell-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.retellai.com/ |
-| huggingface | Hugging Face | account:huggingface | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://router.huggingface.co/ |
-| pinecone | Pinecone | account:pinecone | Accepted Base URL required | apiKey, indexName | connection.fetch(url, init?), connection.template(fieldName) | https://{{connection.indexName}}.pinecone.io |
-| xai | xAI | account:xai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.x.ai/v1/ |
-| stability-ai | Stability AI | account:stability-ai | No extra user scope | Organization, apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.stability.ai/ |
-| exa-ai | Exa | account:exa-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.exa.ai/ |
-| azure-openai | Azure OpenAI | account:azure-openai, account:azure-openai2, account:azure-openai2,azure-openai3, account:azure-openai3 | Accepted Base URL required | accessToken, azureOpenAiKey, baseUrl, endpoints, isApiKey | connection.fetch(url, init?), connection.template(fieldName) | {{if(connection.isApiKey, connection.baseUrl, connection.endpoints.`Base Endpoint`)}}/openai |
-| qdrant | Qdrant | account:qdrant2 | Accepted Base URL required | apiKey, qdrantUrl | connection.fetch(url, init?), connection.template(fieldName) | {{connection.qdrantUrl}} |
-| qwen-ai | Qwen AI | account:qwen-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://dashscope-intl.aliyuncs.com/api/v1/ |
-| eleven-labs | ElevenLabs | account:eleven-labs | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.elevenlabs.io/ |
-| jina-ai | jina.ai | account:jina-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://r.jina.ai/ |
-| dataforseo | DataForSEO | account:dataforseo | No extra user scope | password, username | connection.fetch(url, init?), connection.template(fieldName) | https://api.dataforseo.com/v3/ |
-| gitlab | GitLab | account:gitlab3, account:gitlab3,gitlab5, account:gitlab5 | Accepted Base URL required | accessToken, domain, privateToken | connection.fetch(url, init?), connection.template(fieldName) | https://{{ifempty(connection.domain, 'gitlab.com')}}/api/v4/ |
-| confluence | Confluence | account:confluence | No extra user scope | accessToken, cloudid | connection.fetch(url, init?), connection.template(fieldName) | https://api.atlassian.com/ex/confluence/{{connection.cloudid}}/wiki/api/v2 |
-| supadata | Supadata | account:supadata | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.supadata.ai/ |
-| browser-act | BrowserAct | account:browser-act | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.browseract.com/ |
-| brightdata | Bright Data | account:brightdata | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.brightdata.com/ |
-| supabase-management | Supabase Management | account:supabase-management | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.supabase.com/ |
-| together-ai | Together AI | account:together-ai | No extra user scope | apiKey | connection.fetch(url, init?), connection.template(fieldName) | https://api.together.xyz/v1/ |
-| azure-ai-foundry | Azure AI Foundry | account:azure-ai-foundry | Accepted Base URL required | AIservices, apiKey | connection.fetch(url, init?), connection.template(fieldName) | {{first(split(connection.AIservices,'cognitiveservices.'))}} |
+| App | Label | Connection types | Request base / scope source | Referenced connection fields | Helpers |
+| --- | --- | --- | --- | --- | --- |
+| google-sheets | Google Sheets | account:google | https://sheets.googleapis.com/v4/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| openai-gpt-3 | OpenAI (ChatGPT, Sora, Whisper) | account:openai-gpt-3 | https://{{temp.region}}api.openai.com/v1 | apiKey, apiOrg, region | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| http | http | account:oauth2, keychain:apikeyauth, keychain:basicauth, keychain:clientcertauth | HTTP Base URL from module UI | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-email | google-email | account:google-restricted | — | accessToken, refreshTokenExpires | connection.template(fieldName) |
+| telegram | Telegram Bot | account:telegram | https://api.telegram.org/bot{{connection.token}}/ | token | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-drive | Google Drive | account:google-custom, account:google-drive, account:google-restricted | https://www.googleapis.com/drive/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| airtable | Airtable | account:airtable2, account:airtable3 | {{getBaseUrl(connection, 'api.airtable.com/v0')}} | accessToken, apiToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| email | email | account:imap,google-restricted,microsoft-smtp-imap, account:smtp,google-restricted,microsoft-smtp-imap | Native broker (no HTTP scope) | — | connection.email.send/search/get, connection.template(fieldName) |
+| notion | Notion | account:notion2, account:notion3 | https://api.notion.com/v1/ | accessToken, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-docs | Google Docs | account:google | https://docs.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| gemini-ai | Google Gemini AI | account:gemini-ai-q9zyjp | https://generativelanguage.googleapis.com/v1beta/ | key | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-calendar | Google Calendar | account:google | https://www.googleapis.com/calendar/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| slack | slack | account:slack | {{ifempty(parameters.domain, 'https://slack.com/api/')}} | accessToken | connection.template(fieldName) |
+| instagram-business | Instagram for Business (Facebook login) | account:facebook | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-pages | Facebook Pages | account:facebook | https://graph.facebook.com/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| pinterest | Pinterest | account:pinterest2 | https://api{{if(connection.sandbox, '-sandbox', '')}}.pinterest.com/v5 | accessToken, sandbox, sandboxToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-forms | Google Forms | account:google | https://forms.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-lead-ads | Facebook Lead Ads | account:facebook | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| linkedin | LinkedIn | account:linkedin-openid, account:linkedin2 | https://api.linkedin.com/rest/ | accessToken, developerApplication, id | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-email | microsoft-email | account:azure | — | accessToken, userId | connection.template(fieldName) |
+| whatsapp-business-cloud | WhatsApp Business Cloud | account:whatsapp-business-cloud, account:whatsapp-business-cloud2 | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| wordpress | WordPress | account:wordpress4 | {{connection.restRouteBase}}wp/v2 | apiKey, password, restRouteBase, username | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| youtube | YouTube | account:youtube | https://www.googleapis.com/youtube/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| tally | Tally | account:tally, account:tally2 | https://api.tally.so/ | accessToken, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| apify | Apify | account:apify, account:apify2 | https://api.apify.com/v2/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| anthropic-claude | Anthropic Claude | account:anthropic-claude | https://api.anthropic.com/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| perplexity-ai | Perplexity AI | account:perplexity-ai | https://api.perplexity.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| dropbox | Dropbox | account:dropbox | https://api.dropboxapi.com/2/ | accessToken, root_namespace_id | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| discord | Discord | account:discord | https://discord.com/api/v10/ | botToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| line | LINE | account:line, account:line2 | https://api.line.me/v2/bot/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| hubspotcrm | HubSpot CRM | account:hubspotcrm, account:hubspotcrm3 | https://api.hubapi.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| zendesk | Zendesk | account:zendesk, account:zendesk4 | https://{{ifempty(connection.subdomain, resolveDomain(connection.domain))}}.zendesk.com/ | accessToken, domain, subdomain | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| shopify | shopify | account:shopify | https://{{connection.domain}}.myshopify.com/admin/api/2026-01/ | accessToken, domain | connection.template(fieldName) |
+| microsoft-excel | Microsoft 365 Excel | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| clickup | ClickUp | account:clickup, account:clickup2 | https://api.clickup.com/api/v2/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| monday | monday.com | account:monday | https://api.monday.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| trello | Trello | account:trello | https://api.trello.com/1/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| twilio | twilio | account:twilio | https://api{{ifempty(connection.region, '.')}}twilio.com/2010-04-01/Accounts/{{connection.sid}} | authToken, region, sid | connection.template(fieldName) |
+| stripe | Stripe | account:stripe, account:stripe2 | https://api.stripe.com/v1/ | accessToken, key, rk | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| onedrive | OneDrive | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| canva | Canva | account:canva | https://api.canva.com/rest/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| calendly | Calendly | account:calendly2 | https://api.calendly.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| woocommerce | WooCommerce | account:woocommerce2 | {{getDomain(connection.domain)}}wp-json/wc/v3/ | domain | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| sendinblue | Brevo | account:sendinblue, account:sendinblue2 | https://api.sendinblue.com/v3/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| highlevel | GoHighLevel | account:highlevel, account:highlevel2, account:highlevel3, account:highlevel4, account:highlevel5 | https://{{if(connection.accessToken, 'services.leadconnectorhq.com', 'rest.gohighlevel.com/v1')}} | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| webflow | Webflow | account:webflow2 | https://api.webflow.com/beta/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| typeform | typeform | account:typeform, account:typeform2 | https://{{switch(connection.region, 'us', 'api.typeform.com', 'eu', 'api.eu.typeform.com', 'eu_new', 'api.typeform.eu', 'api.typeform.com')}} | accessToken, region | connection.template(fieldName) |
+| pipedrive | pipedrive | account:pipedrive | {{getApiURL(connection.accessToken, connection.customDomain, connection.apiDomain)}} | accessToken, apiDomain, apiKey, customDomain | connection.template(fieldName) |
+| manychat | Manychat | account:manychat | https://api.manychat.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| open-router | OpenRouter | account:open-router-4ur2vj, account:open-router3 | https://openrouter.ai/api/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| elevenlabs | ElevenLabs | account:elevenlabs | {{ifempty(connection.region, 'https://api.elevenlabs.io')}}/v1 | apiKey, region | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| browse-ai | Browse AI | account:browse-ai | https://api.browse.ai/v2/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| supabase | Supabase | account:supabase | https://{{connection.projectId}}.supabase.co | apiKey, projectId, schema | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-slides | Google Slides | account:google | https://slides.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| cloudconvert | CloudConvert | account:cloudconvert2, account:cloudconvert3 | https://api.cloudconvert.com/v2/ | accessToken, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| asana | Asana | account:asana | https://app.asana.com/api/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| groq | Groq | account:groq | https://api.groq.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| coda | Coda | account:coda | https://coda.io/apis/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| make | Make | account:make, account:make2 | {{connection.url}}/api/v2 | accessToken, apiKey, url | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-insights | Facebook Insights | account:facebook | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-contacts | Google Contacts | account:google | https://people.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-messenger | Facebook Messenger | account:facebook-messenger2 | https://graph.facebook.com/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| todoist | Todoist | account:todoist3 | https://api.todoist.com/api/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-tasks | Google Tasks | account:google | https://www.googleapis.com/tasks/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| z-api | Z-API | account:z-api | https://api.z-api.io/instances/ | , instanceId, token, tokenId | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| deepseek-ai | DeepSeek AI | account:deepseek-ai | https://api.deepseek.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| mailerlite2 | MailerLite | account:mailerlite2 | https://connect.mailerlite.com/api/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| firecrawl | Firecrawl | account:firecrawl | https://api.firecrawl.dev/v2/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| inoreader | Inoreader | account:inoreader | https://www.inoreader.com/reader/api/0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-calendar | Microsoft 365 Calendar | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| cloudinary | Cloudinary | account:cloudinary | https://api.cloudinary.com/v1_1/{{connection.cloudName}} | apiKey, apiSecret, cloudName | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| active-directory | Microsoft Entra ID | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-ads | Google Ads (Deprecated) | account:google-ads | https://googleads.googleapis.com/v8/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-ads-campaign-management | Google Ads Campaign Management | account:google-ads2 | https://googleads.googleapis.com/{{ifempty(parameters._version, 'v22')}} | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-ads-conversions | Google Ads Conversions | account:google-ads2 | https://googleads.googleapis.com/v22/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-ads-customer-match | Google Ads Customer Match | account:google-ads2 | https://googleads.googleapis.com/v22/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-ads-lead-forms | Google Ads Lead Forms | account:google-ads2 | https://googleads.googleapis.com/v22/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-ads-reports | Google Ads Reports | account:google-ads2 | https://googleads.googleapis.com/v22/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-analytics | Google Analytics (Deprecated) | account:google | https://analyticsreporting.googleapis.com/v4/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-analytics-4 | Google Analytics 4 | account:google-analytics-4 | https://analyticsdata.googleapis.com/v1beta/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-bigquery | BigQuery | account:google | https://bigquery.googleapis.com/bigquery/v2/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-chat | Google Chat | account:google-chat3 | https://chat.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-dialogflow | Google Cloud Dialogflow ES | account:google-custom | https://dialogflow.googleapis.com/v2/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-firestore | Google Cloud Firestore | account:google-custom | https://firestore.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-pubsub | Google Cloud Pub/Sub | account:google-custom | https://pubsub.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-speech | Google Cloud Speech | account:google-cloud-speech | https://speech.googleapis.com/v1p1beta1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-storage | Google Cloud Storage | account:google-custom | https://www.googleapis.com/storage/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-storage-transfer | Google Cloud Storage Transfer Service | account:google-cloud-storage-transfer2 | https://storagetransfer.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-cloud-tts | Google Cloud Text-to-Speech | account:google-custom | https://texttospeech.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-data-studio | Looker Studio | account:google-custom | https://datastudio.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-g-suite | Google Workspace Admin | account:google, account:google-custom | https://www.googleapis.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-groups | Google Groups | account:google | https://www.googleapis.com/admin/directory/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-keep | Google Keep | account:google-custom | https://keep.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-maps | Google Maps | account:google-maps | https://maps.googleapis.com/maps/api/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-meet | Google Meet | account:google | https://www.googleapis.com/calendar/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-my-business | Google Business Profile | account:google-custom, account:google-my-business2 | https://mybusiness.googleapis.com/v4/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-natural-language | Google Natural Language | account:google-custom | https://language.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-photos | Google Photos | account:google-photos2 | https://photoslibrary.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-search-console | Google Search Console | account:google-search-console | https://www.googleapis.com/webmasters/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-shopping | Google Shopping | account:google | https://www.googleapis.com/content/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-translate | google-translate | account:google-translate | — | accessToken | connection.template(fieldName) |
+| google-vertex-ai | Google Vertex AI (Gemini) | account:google-vertex-ai | https://{{parameters.serviceEndpointLocationId}}-aiplatform.googleapis.com/v1 | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| googlecloudvision | Google Cloud Vision | account:googlecloudvision | https://vision.googleapis.com/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| intunes | Microsoft Intune | account:intunes | https://graph.microsoft.com/{{connection.apiVersion}} | accessToken, apiVersion | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| linear | Linear | account:linear | https://api.linear.app/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-ad-campaign-mgmt | Microsoft Advertising Campaign Management | account:microsoft-ad-campaign-mgmt | https://campaign.api.bingads.microsoft.com/CampaignManagement/v13/ | accessToken, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-d365-bc | Microsoft Dynamics 365 Business Central | account:microsoft-d365-bc, account:microsoft-d365-bc2 | https://{{connection.baseUrl}}/{{connection.tenant}}/{{connection.environment}}/{{connection.endPoint}} | accessToken, baseUrl, endPoint, environment, tenant | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-dynamics | Microsoft Dynamics 365 | account:microsoft-dynamics | {{connection.host}} | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-dynamics-365-crm | Microsoft Dynamics 365 - CRM | account:microsoft-dynamics-365-crm | {{connection.host}}/api/data/ | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-dynamics-365-fno | Microsoft Dynamics 365 Finance & Operations | account:microsoft-dynamics-365-fno | {{connection.host}} | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-people | Microsoft 365 People | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-planner | Microsoft 365 Planner | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-power-bi | Microsoft Power BI | account:microsoft-power-bi | https://api.powerbi.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-sharepoint | Microsoft SharePoint Online | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-teams | Microsoft Teams | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-to-do | Microsoft To Do | account:azure | https://graph.microsoft.com/beta/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| resend | Resend | account:resend | https://api.resend.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| baserow | Baserow | account:baserow | {{connection.apiURL}} | apiToken, apiURL | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| cerebras-ai | Cerebras AI | account:cerebras-ai | https://api.cerebras.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| edenaiv3 | Eden AI | account:edenaiv3 | https://api.edenai.run/v3/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| fal-ai | Fal.ai | account:fal-ai | https://queue.fal.run/fal-ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| quickbooks | quickbooks | account:quickbooks | https://{{if(connection.sandbox, 'sandbox-quickbooks', 'quickbooks')}}.api.intuit.com/v3/company/{{connection.realmId}} | accessToken, accessToken2, realmId, sandbox | connection.template(fieldName) |
+| salesforce | salesforce | account:salesforce | {{connection.instanceUrl}}/services/data/ | accessToken, instanceUrl | connection.template(fieldName) |
+| zohocrm | zohocrm | account:zohocrm | {{parseZohoUrl(connection)}}/crm/v3 | accessToken | connection.template(fieldName) |
+| mysql | mysql | account:mysql | Native broker (no HTTP scope) | — | connection.sql.query(sql, params?), connection.template(fieldName) |
+| postgres | postgres | account:postgres | Native broker (no HTTP scope) | — | connection.sql.query(sql, params?), connection.template(fieldName) |
+| box | box | account:box | — | accessToken | connection.template(fieldName) |
+| toggl | toggl | account:toggl | — | apiToken | connection.template(fieldName) |
+| reddit | reddit | account:reddit | https://oauth.reddit.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| jira | Jira Cloud Platform | account:jira, account:jira-service-desk2 | {{if(connection.cloudId, 'https://api.atlassian.com/ex/jira/' + connection.cloudId + '/rest/api/3', connection.url + '/rest/api/3')}} | accessToken, cloudId, password, url, username | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| github | GitHub | account:github, account:github2 | https://api.github.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| mistral-ai | Mistral AI | account:mistral-ai | https://api.mistral.ai/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| fireflies-ai | Fireflies.ai | account:fireflies-ai | https://api.fireflies.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| leonardo-ai | Leonardo.Ai | account:leonardo-ai | https://cloud.leonardo.ai/api/rest/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| assembly-ai | AssemblyAI | account:assembly-ai | https://{{connection.environment}}.assemblyai.com | apiKey, environment | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| retell-ai | Retell AI | account:retell-ai | https://api.retellai.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| huggingface | Hugging Face | account:huggingface | https://router.huggingface.co/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| pinecone | Pinecone | account:pinecone | https://{{connection.indexName}}.pinecone.io | apiKey, indexName | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| xai | xAI | account:xai | https://api.x.ai/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| stability-ai | Stability AI | account:stability-ai | https://api.stability.ai/ | Organization, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| exa-ai | Exa | account:exa-ai | https://api.exa.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| qdrant | Qdrant | account:qdrant2 | {{connection.qdrantUrl}} | apiKey, qdrantUrl | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| qwen-ai | Qwen AI | account:qwen-ai | https://dashscope-intl.aliyuncs.com/api/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| eleven-labs | ElevenLabs | account:eleven-labs | https://api.elevenlabs.io/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| jina-ai | jina.ai | account:jina-ai | https://r.jina.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| dataforseo | DataForSEO | account:dataforseo | https://api.dataforseo.com/v3/ | password, username | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| confluence | Confluence | account:confluence | https://api.atlassian.com/ex/confluence/{{connection.cloudid}}/wiki/api/v2 | accessToken, cloudid | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| supadata | Supadata | account:supadata | https://api.supadata.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| browser-act | BrowserAct | account:browser-act | https://api.browseract.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| brightdata | Bright Data | account:brightdata | https://api.brightdata.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| supabase-management | Supabase Management | account:supabase-management | https://api.supabase.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| together-ai | Together AI | account:together-ai | https://api.together.xyz/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
