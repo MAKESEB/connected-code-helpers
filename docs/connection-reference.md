@@ -1,6 +1,7 @@
 # Connected Code connection reference
 
-This file documents how an LLM should write code for Make Connected Code with selected Apps and Make Connections.
+This repository contains copy-pasteable helper guidance for Make Connected Code.
+It is generated from the current Connected Code catalog shape: 157 apps.
 
 ## Runtime helpers
 
@@ -8,18 +9,18 @@ This file documents how an LLM should write code for Make Connected Code with se
 | --- | --- |
 | `input` | Mapped business inputs only. Do not map secrets, tokens, passwords, hosts, or connection strings. |
 | `connection.id` | Metadata id for the selected Make connection/keychain handle. |
-| `connection.fetch(pathOrUrl, init?)` | Make an HTTP request through the scoped proxy. Prefer relative paths such as `/v1/models`; the selected App/Connection supplies base URL and auth. |
-| `connection.sql.query(sql, params?)` | SQL apps only. Pass SQL and params; endpoint/auth stay in the Make connection. |
-| `connection.email.send/search/get(...)` | Email apps only. Pass mail content/search inputs; SMTP/IMAP credentials stay in the Make connection. |
-| `connection.template(fieldName)` | Escape hatch for rare custom URL/header/body placement. Prefer not to use it; secrets still render only inside the proxy. |
+| `connection.fetch(pathOrUrl, init?)` | HTTP/API request through the scoped proxy. Prefer relative paths such as `/v1/models`; the selected App/Connection supplies base URL and configured auth when available. |
+| `connection.sql.query(sql, params?)` | SQL apps only. Runs through the native proxy broker; DB host, username, password, and TLS settings stay in the Make connection/proxy sandbox. |
+| `connection.email.send/search/get(...)` | Email apps only. Runs through the native email broker; SMTP/IMAP credentials stay in the Make connection/proxy sandbox. |
+| `connection.template(fieldName)` | Escape hatch for rare custom URL/header/body placement. It gives user code a template marker; the secret renders only inside the proxy request. Prefer configured auth or `connection.fetch` options first. |
 
-## If you are an LLM writing Connected Code
+## Rules for LLM-authored Connected Code
 
 1. Use `input` only for business data.
-2. Use `connection.fetch(...)` for HTTP/API apps; never call global `fetch(...)` for authenticated app calls.
+2. Use `connection.fetch(...)` for HTTP/API apps; do not call global `fetch(...)` for authenticated app calls.
 3. Prefer relative paths: `connection.fetch('/items')`. Connected Code joins the path to the selected App request base and validates it stays inside the allowed proxy scope.
 4. Add query/body/headers through the second argument: `{ query, json, body, headers, method }`.
-5. Do not read or return raw connection secrets. User code receives a capability, not raw credential data.
+5. Do not read, log, or return raw connection secrets. User code receives a capability, not raw credential data.
 6. For SQL apps, use `connection.sql.query(sql, params?)`.
 7. For Email apps, use `connection.email.*`.
 8. Always check `response.ok` before parsing HTTP responses.
@@ -45,15 +46,44 @@ const response = await connection.fetch('/v1/items', {
   headers: { 'x-extra-header': 'value' },
   json: { name: input.name }
 });
-if (!response.ok) throw new Error(`Request failed ${response.status}: ${await response.text()}`);
-return response.json();
+const text = await response.text();
+if (!response.ok) throw new Error(`Request failed ${response.status}: ${text}`);
+return JSON.parse(text);
+```
+
+### HTTP keychain with custom bearer placement
+
+Use this only when the generic HTTP credential cannot express the API's required auth placement. The secret still renders only inside the proxy request.
+
+```js
+const response = await connection.fetch('/v1/models', {
+  method: 'GET',
+  headers: { Authorization: `Bearer ${connection.template('key')}` }
+});
+const text = await response.text();
+if (!response.ok) throw new Error(`Request failed ${response.status}: ${text.slice(0, 300)}`);
+return JSON.parse(text);
 ```
 
 ### SQL pattern
 
 ```js
-const result = await connection.sql.query('select $1::text as message', ['hello']);
+const result = await connection.sql.query(
+  'select $1::text as message, current_database() as database',
+  ['hello from connected code']
+);
 return result.rows;
+```
+
+### Email send pattern
+
+```js
+await connection.email.send({
+  to: input.to,
+  subject: input.subject,
+  text: input.message
+});
+return { sent: true };
 ```
 
 ## Scope model
@@ -65,16 +95,14 @@ return result.rows;
 - PostgreSQL, MySQL, and Email use native broker helpers instead of HTTP proxy scopes.
 - Requests outside the selected App scope fail closed.
 
-## HTTP credential connection types
+## Generic HTTP credential connection types
 
 | Connection Type | Typical use |
 | --- | --- |
 | `account:oauth2` | OAuth 2 HTTP connection. Set HTTP Base URL in the module UI, then call relative paths. |
 | `keychain:apikeyauth` | API key HTTP credential. Set HTTP Base URL in the module UI. |
 | `keychain:basicauth` | Basic auth HTTP credential. |
-| `keychain:cacert` | CA certificate HTTP credential. |
 | `keychain:clientcertauth` | Client certificate / mTLS HTTP credential. |
-| `keychain:proxy` | HTTP proxy credential. |
 
 ## App catalog
 
@@ -82,25 +110,25 @@ return result.rows;
 | --- | --- | --- | --- | --- | --- |
 | google-sheets | Google Sheets | account:google | https://sheets.googleapis.com/v4/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | openai-gpt-3 | OpenAI (ChatGPT, Sora, Whisper) | account:openai-gpt-3 | https://{{temp.region}}api.openai.com/v1 | apiKey, apiOrg, region | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| http | http | account:oauth2, keychain:apikeyauth, keychain:basicauth, keychain:clientcertauth | HTTP Base URL from module UI | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| google-email | google-email | account:google-restricted | — | accessToken, refreshTokenExpires | connection.template(fieldName) |
+| http | HTTP | account:oauth2, keychain:apikeyauth, keychain:basicauth, keychain:clientcertauth | HTTP Base URL from module UI | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-email | Gmail | account:google-restricted | Native broker | accessToken, refreshTokenExpires | connection.template(fieldName) |
 | telegram | Telegram Bot | account:telegram | https://api.telegram.org/bot{{connection.token}}/ | token | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-drive | Google Drive | account:google-custom, account:google-drive, account:google-restricted | https://www.googleapis.com/drive/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | airtable | Airtable | account:airtable2, account:airtable3 | {{getBaseUrl(connection, 'api.airtable.com/v0')}} | accessToken, apiToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| email | email | account:imap,google-restricted,microsoft-smtp-imap, account:smtp,google-restricted,microsoft-smtp-imap | Native broker (no HTTP scope) | — | connection.email.send/search/get, connection.template(fieldName) |
+| email | Email | account:imap,google-restricted,microsoft-smtp-imap, account:smtp,google-restricted,microsoft-smtp-imap | Native Email broker | — | connection.email.send/search/get, connection.template(fieldName) |
 | notion | Notion | account:notion2, account:notion3 | https://api.notion.com/v1/ | accessToken, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-docs | Google Docs | account:google | https://docs.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | gemini-ai | Google Gemini AI | account:gemini-ai-q9zyjp | https://generativelanguage.googleapis.com/v1beta/ | key | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-calendar | Google Calendar | account:google | https://www.googleapis.com/calendar/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| slack | slack | account:slack | {{ifempty(parameters.domain, 'https://slack.com/api/')}} | accessToken | connection.template(fieldName) |
-| instagram-business | Instagram for Business (Facebook login) | account:facebook | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| facebook-pages | Facebook Pages | account:facebook | https://graph.facebook.com/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| slack | Slack | account:slack | Native broker | accessToken | connection.template(fieldName) |
+| instagram-business | Instagram for Business (Facebook login) | account:facebook | https://graph.facebook.com/<br>https://graph.facebook.com/v25.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-pages | Facebook Pages | account:facebook | https://graph.facebook.com/<br>https://graph.facebook.com/v25.0/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | pinterest | Pinterest | account:pinterest2 | https://api{{if(connection.sandbox, '-sandbox', '')}}.pinterest.com/v5 | accessToken, sandbox, sandboxToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-forms | Google Forms | account:google | https://forms.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| facebook-lead-ads | Facebook Lead Ads | account:facebook | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-lead-ads | Facebook Lead Ads | account:facebook | https://graph.facebook.com/<br>https://graph.facebook.com/v25.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | linkedin | LinkedIn | account:linkedin-openid, account:linkedin2 | https://api.linkedin.com/rest/ | accessToken, developerApplication, id | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-email | microsoft-email | account:azure | — | accessToken, userId | connection.template(fieldName) |
-| whatsapp-business-cloud | WhatsApp Business Cloud | account:whatsapp-business-cloud, account:whatsapp-business-cloud2 | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-email | Microsoft Email Outlook | account:azure | Native broker | accessToken, userId | connection.template(fieldName) |
+| whatsapp-business-cloud | WhatsApp Business Cloud | account:whatsapp-business-cloud, account:whatsapp-business-cloud2 | https://graph.facebook.com/<br>https://graph.facebook.com/v25.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | wordpress | WordPress | account:wordpress4 | {{connection.restRouteBase}}wp/v2 | apiKey, password, restRouteBase, username | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | youtube | YouTube | account:youtube | https://www.googleapis.com/youtube/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | tally | Tally | account:tally, account:tally2 | https://api.tally.so/ | accessToken, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -112,22 +140,22 @@ return result.rows;
 | line | LINE | account:line, account:line2 | https://api.line.me/v2/bot/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | hubspotcrm | HubSpot CRM | account:hubspotcrm, account:hubspotcrm3 | https://api.hubapi.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | zendesk | Zendesk | account:zendesk, account:zendesk4 | https://{{ifempty(connection.subdomain, resolveDomain(connection.domain))}}.zendesk.com/ | accessToken, domain, subdomain | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| shopify | shopify | account:shopify | https://{{connection.domain}}.myshopify.com/admin/api/2026-01/ | accessToken, domain | connection.template(fieldName) |
-| microsoft-excel | Microsoft 365 Excel | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| shopify | Shopify | account:shopify | Native broker | accessToken, domain | connection.template(fieldName) |
+| microsoft-excel | Microsoft 365 Excel | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | clickup | ClickUp | account:clickup, account:clickup2 | https://api.clickup.com/api/v2/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | monday | monday.com | account:monday | https://api.monday.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | trello | Trello | account:trello | https://api.trello.com/1/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| twilio | twilio | account:twilio | https://api{{ifempty(connection.region, '.')}}twilio.com/2010-04-01/Accounts/{{connection.sid}} | authToken, region, sid | connection.template(fieldName) |
+| twilio | Twilio | account:twilio | Native broker | authToken, region, sid | connection.template(fieldName) |
 | stripe | Stripe | account:stripe, account:stripe2 | https://api.stripe.com/v1/ | accessToken, key, rk | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| onedrive | OneDrive | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| onedrive | OneDrive | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | canva | Canva | account:canva | https://api.canva.com/rest/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | calendly | Calendly | account:calendly2 | https://api.calendly.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | woocommerce | WooCommerce | account:woocommerce2 | {{getDomain(connection.domain)}}wp-json/wc/v3/ | domain | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | sendinblue | Brevo | account:sendinblue, account:sendinblue2 | https://api.sendinblue.com/v3/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | highlevel | GoHighLevel | account:highlevel, account:highlevel2, account:highlevel3, account:highlevel4, account:highlevel5 | https://{{if(connection.accessToken, 'services.leadconnectorhq.com', 'rest.gohighlevel.com/v1')}} | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | webflow | Webflow | account:webflow2 | https://api.webflow.com/beta/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| typeform | typeform | account:typeform, account:typeform2 | https://{{switch(connection.region, 'us', 'api.typeform.com', 'eu', 'api.eu.typeform.com', 'eu_new', 'api.typeform.eu', 'api.typeform.com')}} | accessToken, region | connection.template(fieldName) |
-| pipedrive | pipedrive | account:pipedrive | {{getApiURL(connection.accessToken, connection.customDomain, connection.apiDomain)}} | accessToken, apiDomain, apiKey, customDomain | connection.template(fieldName) |
+| typeform | Typeform | account:typeform, account:typeform2 | Native broker | accessToken, region | connection.template(fieldName) |
+| pipedrive | Pipedrive | account:pipedrive | Native broker | accessToken, apiDomain, apiKey, customDomain | connection.template(fieldName) |
 | manychat | Manychat | account:manychat | https://api.manychat.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | open-router | OpenRouter | account:open-router-4ur2vj, account:open-router3 | https://openrouter.ai/api/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | elevenlabs | ElevenLabs | account:elevenlabs | {{ifempty(connection.region, 'https://api.elevenlabs.io')}}/v1 | apiKey, region | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -135,23 +163,23 @@ return result.rows;
 | supabase | Supabase | account:supabase | https://{{connection.projectId}}.supabase.co | apiKey, projectId, schema | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-slides | Google Slides | account:google | https://slides.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | cloudconvert | CloudConvert | account:cloudconvert2, account:cloudconvert3 | https://api.cloudconvert.com/v2/ | accessToken, apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| asana | Asana | account:asana | https://app.asana.com/api/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| asana | Asana | account:asana | https://app.asana.com/api/<br>https://app.asana.com/api/1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | groq | Groq | account:groq | https://api.groq.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | coda | Coda | account:coda | https://coda.io/apis/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | make | Make | account:make, account:make2 | {{connection.url}}/api/v2 | accessToken, apiKey, url | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| facebook-insights | Facebook Insights | account:facebook | https://graph.facebook.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-insights | Facebook Insights | account:facebook | https://graph.facebook.com/<br>https://graph.facebook.com/v25.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-contacts | Google Contacts | account:google | https://people.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| facebook-messenger | Facebook Messenger | account:facebook-messenger2 | https://graph.facebook.com/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| facebook-messenger | Facebook Messenger | account:facebook-messenger2 | https://graph.facebook.com/<br>https://graph.facebook.com/v25.0/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | todoist | Todoist | account:todoist3 | https://api.todoist.com/api/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-tasks | Google Tasks | account:google | https://www.googleapis.com/tasks/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| z-api | Z-API | account:z-api | https://api.z-api.io/instances/ | , instanceId, token, tokenId | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| z-api | Z-API | account:z-api | https://api.z-api.io/instances/ | instanceId, token, tokenId | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | deepseek-ai | DeepSeek AI | account:deepseek-ai | https://api.deepseek.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | mailerlite2 | MailerLite | account:mailerlite2 | https://connect.mailerlite.com/api/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | firecrawl | Firecrawl | account:firecrawl | https://api.firecrawl.dev/v2/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | inoreader | Inoreader | account:inoreader | https://www.inoreader.com/reader/api/0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-calendar | Microsoft 365 Calendar | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-calendar | Microsoft 365 Calendar | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | cloudinary | Cloudinary | account:cloudinary | https://api.cloudinary.com/v1_1/{{connection.cloudName}} | apiKey, apiSecret, cloudName | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| active-directory | Microsoft Entra ID | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| active-directory | Microsoft Entra ID | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-ads | Google Ads (Deprecated) | account:google-ads | https://googleads.googleapis.com/v8/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-ads-campaign-management | Google Ads Campaign Management | account:google-ads2 | https://googleads.googleapis.com/{{ifempty(parameters._version, 'v22')}} | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-ads-conversions | Google Ads Conversions | account:google-ads2 | https://googleads.googleapis.com/v22/ | accessToken, clientId, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -179,8 +207,8 @@ return result.rows;
 | google-natural-language | Google Natural Language | account:google-custom | https://language.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-photos | Google Photos | account:google-photos2 | https://photoslibrary.googleapis.com/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-search-console | Google Search Console | account:google-search-console | https://www.googleapis.com/webmasters/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| google-shopping | Google Shopping | account:google | https://www.googleapis.com/content/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| google-translate | google-translate | account:google-translate | — | accessToken | connection.template(fieldName) |
+| google-shopping | Google Shopping | account:google | https://www.googleapis.com/content/<br>https://www.googleapis.com/content/v2.1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| google-translate | Google Translate | account:google-translate | Native broker | accessToken | connection.template(fieldName) |
 | google-vertex-ai | Google Vertex AI (Gemini) | account:google-vertex-ai | https://{{parameters.serviceEndpointLocationId}}-aiplatform.googleapis.com/v1 | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | googlecloudvision | Google Cloud Vision | account:googlecloudvision | https://vision.googleapis.com/ | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | intunes | Microsoft Intune | account:intunes | https://graph.microsoft.com/{{connection.apiVersion}} | accessToken, apiVersion | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -188,27 +216,27 @@ return result.rows;
 | microsoft-ad-campaign-mgmt | Microsoft Advertising Campaign Management | account:microsoft-ad-campaign-mgmt | https://campaign.api.bingads.microsoft.com/CampaignManagement/v13/ | accessToken, customerId, developerToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | microsoft-d365-bc | Microsoft Dynamics 365 Business Central | account:microsoft-d365-bc, account:microsoft-d365-bc2 | https://{{connection.baseUrl}}/{{connection.tenant}}/{{connection.environment}}/{{connection.endPoint}} | accessToken, baseUrl, endPoint, environment, tenant | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | microsoft-dynamics | Microsoft Dynamics 365 | account:microsoft-dynamics | {{connection.host}} | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-dynamics-365-crm | Microsoft Dynamics 365 - CRM | account:microsoft-dynamics-365-crm | {{connection.host}}/api/data/ | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-dynamics-365-crm | Microsoft Dynamics 365 - CRM | account:microsoft-dynamics-365-crm | {{connection.host}}/api/data/<br>{{connection.host}}/api/data/v9.2 | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | microsoft-dynamics-365-fno | Microsoft Dynamics 365 Finance & Operations | account:microsoft-dynamics-365-fno | {{connection.host}} | accessToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-people | Microsoft 365 People | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-planner | Microsoft 365 Planner | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-power-bi | Microsoft Power BI | account:microsoft-power-bi | https://api.powerbi.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-sharepoint | Microsoft SharePoint Online | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| microsoft-teams | Microsoft Teams | account:azure | https://graph.microsoft.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-people | Microsoft 365 People | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-planner | Microsoft 365 Planner | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-power-bi | Microsoft Power BI | account:microsoft-power-bi | https://api.powerbi.com/<br>https://api.powerbi.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-sharepoint | Microsoft SharePoint Online | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| microsoft-teams | Microsoft Teams | account:azure | https://graph.microsoft.com/<br>https://graph.microsoft.com/v1.0/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | microsoft-to-do | Microsoft To Do | account:azure | https://graph.microsoft.com/beta/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | resend | Resend | account:resend | https://api.resend.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | baserow | Baserow | account:baserow | {{connection.apiURL}} | apiToken, apiURL | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | cerebras-ai | Cerebras AI | account:cerebras-ai | https://api.cerebras.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | edenaiv3 | Eden AI | account:edenaiv3 | https://api.edenai.run/v3/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | fal-ai | Fal.ai | account:fal-ai | https://queue.fal.run/fal-ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| quickbooks | quickbooks | account:quickbooks | https://{{if(connection.sandbox, 'sandbox-quickbooks', 'quickbooks')}}.api.intuit.com/v3/company/{{connection.realmId}} | accessToken, accessToken2, realmId, sandbox | connection.template(fieldName) |
-| salesforce | salesforce | account:salesforce | {{connection.instanceUrl}}/services/data/ | accessToken, instanceUrl | connection.template(fieldName) |
-| zohocrm | zohocrm | account:zohocrm | {{parseZohoUrl(connection)}}/crm/v3 | accessToken | connection.template(fieldName) |
-| mysql | mysql | account:mysql | Native broker (no HTTP scope) | — | connection.sql.query(sql, params?), connection.template(fieldName) |
-| postgres | postgres | account:postgres | Native broker (no HTTP scope) | — | connection.sql.query(sql, params?), connection.template(fieldName) |
-| box | box | account:box | — | accessToken | connection.template(fieldName) |
-| toggl | toggl | account:toggl | — | apiToken | connection.template(fieldName) |
-| reddit | reddit | account:reddit | https://oauth.reddit.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| quickbooks | QuickBooks | account:quickbooks | Native broker | accessToken, accessToken2, realmId, sandbox | connection.template(fieldName) |
+| salesforce | Salesforce | account:salesforce | Native broker | accessToken, instanceUrl | connection.template(fieldName) |
+| zohocrm | Zoho CRM | account:zohocrm | Native broker | accessToken | connection.template(fieldName) |
+| mysql | MySQL | account:mysql | Native MySQL broker | — | connection.sql.query(sql, params?), connection.template(fieldName) |
+| postgres | PostgreSQL | account:postgres | Native PostgreSQL broker | — | connection.sql.query(sql, params?), connection.template(fieldName) |
+| box | Box | account:box | Native broker | accessToken | connection.template(fieldName) |
+| toggl | Toggl | account:toggl | Native broker | apiToken | connection.template(fieldName) |
+| reddit | Reddit | account:reddit | https://oauth.reddit.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | jira | Jira Cloud Platform | account:jira, account:jira-service-desk2 | {{if(connection.cloudId, 'https://api.atlassian.com/ex/jira/' + connection.cloudId + '/rest/api/3', connection.url + '/rest/api/3')}} | accessToken, cloudId, password, url, username | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | github | GitHub | account:github, account:github2 | https://api.github.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | mistral-ai | Mistral AI | account:mistral-ai | https://api.mistral.ai/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -224,7 +252,7 @@ return result.rows;
 | qdrant | Qdrant | account:qdrant2 | {{connection.qdrantUrl}} | apiKey, qdrantUrl | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | qwen-ai | Qwen AI | account:qwen-ai | https://dashscope-intl.aliyuncs.com/api/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | eleven-labs | ElevenLabs | account:eleven-labs | https://api.elevenlabs.io/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| jina-ai | jina.ai | account:jina-ai | https://r.jina.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| jina-ai | Jina AI | account:jina-ai | https://r.jina.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | dataforseo | DataForSEO | account:dataforseo | https://api.dataforseo.com/v3/ | password, username | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | confluence | Confluence | account:confluence | https://api.atlassian.com/ex/confluence/{{connection.cloudid}}/wiki/api/v2 | accessToken, cloudid | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | supadata | Supadata | account:supadata | https://api.supadata.ai/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -232,3 +260,8 @@ return result.rows;
 | brightdata | Bright Data | account:brightdata | https://api.brightdata.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | supabase-management | Supabase Management | account:supabase-management | https://api.supabase.com/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | together-ai | Together AI | account:together-ai | https://api.together.xyz/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| sap-s4hana | SAP S/4HANA | account:sap-s4hana | {{connection.host}}/sap/opu/odata{{switch(temp.odataVersion, '2', '', '4', '4', '')}}/sap | authHeader, cookie, csrfToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| xero | Xero | account:xero-event, account:xero3 | https://api.xero.com/api.xro/<br>https://api.xero.com/api.xro/2.0/ | accessToken, connections, tenantId | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| bexio | Bexio | account:bexio | https://api.bexio.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| boostspace | Boost.space | account:boostspace | https://{{connection.syskey}}.boost.space | syskey, token | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| magento | Magento | account:magento | Native broker | — | connection.template(fieldName) |
