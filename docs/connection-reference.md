@@ -1,7 +1,7 @@
 # Connected Code connection reference
 
 This repository contains copy-pasteable helper guidance for Make Connected Code.
-It is generated from the current Connected Code catalog shape: 157 apps.
+It is generated from the current Connected Code 1.2.2 catalog shape: 159 apps.
 
 ## Runtime helpers
 
@@ -11,7 +11,7 @@ It is generated from the current Connected Code catalog shape: 157 apps.
 | `connection.id` | Metadata id for the selected Make connection/keychain handle. |
 | `connection.fetch(pathOrUrl, init?)` | HTTP/API request through the scoped proxy. Prefer relative paths such as `/v1/models`; the selected App/Connection supplies base URL and configured auth when available. |
 | `connection.sql.query(sql, params?)` | SQL apps only. Runs through the native proxy broker; DB host, username, password, and TLS settings stay in the Make connection/proxy sandbox. |
-| `connection.email.send/search/get(...)` | Email apps only. Runs through the native email broker; SMTP/IMAP credentials stay in the Make connection/proxy sandbox. |
+| `connection.email.send/search/get(...)` | Generic **Email** App only. Runs through its native SMTP/IMAP broker. Gmail is an HTTP API App and must use `connection.fetch(...)`. |
 | `connection.template(fieldName)` | Escape hatch for rare custom URL/header/body placement. It gives user code a template marker; the secret renders only inside the proxy request. Prefer configured auth or `connection.fetch` options first. |
 
 ## Rules for LLM-authored Connected Code
@@ -22,7 +22,7 @@ It is generated from the current Connected Code catalog shape: 157 apps.
 4. Add query/body/headers through the second argument: `{ query, json, body, headers, method }`.
 5. Do not read, log, or return raw connection secrets. User code receives a capability, not raw credential data.
 6. For SQL apps, use `connection.sql.query(sql, params?)`.
-7. For Email apps, use `connection.email.*`.
+7. Use `connection.email.*` only when the module's selected App is **Email** with an SMTP/IMAP connection. Gmail and other HTTP API Apps use `connection.fetch(...)`.
 8. Always check `response.ok` before parsing HTTP responses.
 9. Return JSON-serializable data.
 
@@ -58,7 +58,7 @@ Use this only when the generic HTTP credential cannot express the API's required
 ```js
 const response = await connection.fetch('/v1/models', {
   method: 'GET',
-  headers: { Authorization: `Bearer ${connection.template('key')}` }
+  headers: { Authorization: 'Bearer ' + connection.template('key') }
 });
 const text = await response.text();
 if (!response.ok) throw new Error(`Request failed ${response.status}: ${text.slice(0, 300)}`);
@@ -77,6 +77,8 @@ return result.rows;
 
 ### Email send pattern
 
+This broker example is for the generic **Email** App with an SMTP connection. It is not a Gmail example.
+
 ```js
 await connection.email.send({
   to: input.to,
@@ -86,13 +88,182 @@ await connection.email.send({
 return { sent: true };
 ```
 
+## Make module setup: Gmail and Sage
+
+The App selected in the Make Connected Code module determines both the connection binder and the supported helper surface. Saving a connection does not turn every helper into a supported operation.
+
+| Selected App in the module | Connection | Correct helper |
+| --- | --- | --- |
+| Gmail | A newly authorized Gmail connection (`account:google-email`) | `connection.fetch(...)` |
+| Sage Business Cloud Accounting | Sage Business Cloud Accounting connection (`account:sage-accounting`) | `connection.fetch(...)` |
+| Sage Intacct | Sage Intacct OAuth 2.0 connection (`account:sage-intacct2`) | `connection.fetch(...)` |
+| Email | SMTP/IMAP connection | `connection.email.*` |
+| PostgreSQL / MySQL | Matching database connection | `connection.sql.query(...)` |
+
+Do not map an access token into `input` and do not add an `Authorization` header. Connected Code injects the selected connection's OAuth token inside the scoped proxy.
+
+### Gmail: list unread messages
+
+Module setup:
+
+1. Select **Gmail** as the App.
+2. Create or select a **Gmail Connection**. For connections created before Connected Code 1.2.2, create a new connection or reauthorize it so the Gmail `modify`, `readonly`, and `send` scopes are granted.
+3. Optional inputs: `query` and `limit`.
+4. Use `connection.fetch(...)`; do not use `connection.email.search(...)`.
+
+The Gmail request base is `https://gmail.googleapis.com/gmail/v1/users/me/`, so `/messages` resolves inside the authenticated user's mailbox.
+
+```js
+const limit = Math.max(1, Math.min(Number(input.limit || 10), 100));
+const response = await connection.fetch('/messages', {
+  method: 'GET',
+  query: {
+    q: input.query || 'is:unread',
+    maxResults: limit
+  }
+});
+
+const text = await response.text();
+if (!response.ok) {
+  throw new Error(`Gmail request failed ${response.status}: ${text.slice(0, 500)}`);
+}
+
+const data = JSON.parse(text);
+return {
+  messages: data.messages || [],
+  nextPageToken: data.nextPageToken || null,
+  resultSizeEstimate: data.resultSizeEstimate || 0
+};
+```
+
+### Gmail: send an email
+
+Use the Gmail REST API instead of `connection.email.send(...)`:
+
+```js
+function safeHeader(value, name) {
+  const text = String(value || '').trim();
+  if (!text || /[\r\n]/.test(text)) throw new Error(`Invalid ${name}`);
+  return text;
+}
+
+const to = safeHeader(input.to, 'recipient');
+const subject = safeHeader(input.subject, 'subject');
+const rawMessage = [
+  `To: ${to}`,
+  `Subject: ${subject}`,
+  'Content-Type: text/plain; charset="UTF-8"',
+  'MIME-Version: 1.0',
+  '',
+  String(input.message || '')
+].join('\r\n');
+
+const response = await connection.fetch('/messages/send', {
+  method: 'POST',
+  json: { raw: Buffer.from(rawMessage, 'utf8').toString('base64url') }
+});
+
+const text = await response.text();
+if (!response.ok) {
+  throw new Error(`Gmail send failed ${response.status}: ${text.slice(0, 500)}`);
+}
+return JSON.parse(text);
+```
+
+### Sage Business Cloud Accounting: list businesses
+
+Module setup:
+
+1. Select **Sage Business Cloud Accounting** as the App.
+2. Select its Sage connection.
+3. Use the `/businesses` endpoint with `connection.fetch(...)`.
+
+```js
+const response = await connection.fetch('/businesses', {
+  method: 'GET'
+});
+
+const text = await response.text();
+if (!response.ok) {
+  throw new Error(`Sage Accounting request failed ${response.status}: ${text.slice(0, 500)}`);
+}
+
+const data = JSON.parse(text);
+return data.$items || data;
+```
+
+Most business-specific Sage Accounting endpoints also require the non-secret business id in `X-Business`. Map a `businessId` input and pass it explicitly:
+
+```js
+const response = await connection.fetch('/contacts', {
+  method: 'GET',
+  headers: { 'X-Business': String(input.businessId) },
+  query: { items_per_page: 50 }
+});
+const text = await response.text();
+if (!response.ok) throw new Error(`Sage contacts failed ${response.status}: ${text.slice(0, 500)}`);
+const data = JSON.parse(text);
+return data.$items || data;
+```
+
+### Sage Intacct: query affiliate entities
+
+Sage Intacct is a separate App and connection from Sage Business Cloud Accounting. Its request base is `https://api.intacct.com/ia/api/v1/`.
+
+```js
+const response = await connection.fetch('/services/core/query', {
+  method: 'POST',
+  json: {
+    object: 'company-config/affiliate-entity',
+    fields: ['key', 'id', 'name'],
+    size: 100,
+    orderBy: [{ id: 'asc' }]
+  }
+});
+
+const text = await response.text();
+if (!response.ok) {
+  throw new Error(`Sage Intacct request failed ${response.status}: ${text.slice(0, 500)}`);
+}
+return JSON.parse(text);
+```
+
+For an entity-specific Intacct request, map `entityId` and add `X-IA-API-Param-Entity`; Connected Code still injects the OAuth `Authorization` header itself.
+
+## Troubleshooting: `Broker is not configured for this connection`
+
+Example failure:
+
+```text
+Code execution failed: connection broker failed: 500
+{"error":"Broker is not configured for this connection"}
+```
+
+This is a helper/App mismatch, not a request-body error and usually not a missing password:
+
+- `connection.sql.query(...)` calls the native PostgreSQL/MySQL broker.
+- `connection.email.*` calls the native SMTP/IMAP broker used by the generic **Email** App.
+- Gmail, Sage Business Cloud Accounting, and Sage Intacct are scoped HTTP API Apps. They intentionally have no SQL or Email broker configuration.
+- The helper properties can exist on the runtime `connection` object even when the selected App does not support that broker. Calling one then returns this 500.
+
+Fix it in the Make module:
+
+1. Confirm the module's **App** is Gmail, Sage Business Cloud Accounting, or Sage Intacct as intended.
+2. Confirm the corresponding connection is selected and save the module.
+3. Replace `connection.email.*` or `connection.sql.*` with the appropriate `connection.fetch('/relative/path', ...)` example above.
+4. Do not add or map the OAuth token manually.
+5. For Gmail, create or reauthorize the dedicated Gmail connection if the next response is `401` or `403`; older saved connections may not have the new Gmail scopes.
+6. If you actually need SMTP/IMAP, select the generic **Email** App instead of Gmail and then use `connection.email.*`.
+
+If `connection.fetch(...)` reports that the proxy is unavailable, reselect the App and Connection in the module and save it. That is a binding/setup problem; it is different from the broker-mismatch 500 above.
+
 ## Scope model
 
 - Connected Code never exposes raw credentials to user code.
 - The selected Make connection/keychain is available only in the proxy sandbox.
 - Service Apps derive request bases and allowed scopes from the generated catalog and selected connection data.
 - HTTP App is the only app that asks for an explicit `HTTP Base URL`.
-- PostgreSQL, MySQL, and Email use native broker helpers instead of HTTP proxy scopes.
+- PostgreSQL, MySQL, and the generic Email App use native broker helpers instead of HTTP proxy scopes.
 - Requests outside the selected App scope fail closed.
 
 ## Generic HTTP credential connection types
@@ -111,7 +282,7 @@ return { sent: true };
 | google-sheets | Google Sheets | account:google | https://sheets.googleapis.com/v4/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | openai-gpt-3 | OpenAI (ChatGPT, Sora, Whisper) | account:openai-gpt-3 | https://{{temp.region}}api.openai.com/v1 | apiKey, apiOrg, region | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | http | HTTP | account:oauth2, keychain:apikeyauth, keychain:basicauth, keychain:clientcertauth | HTTP Base URL from module UI | — | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
-| google-email | Gmail | account:google-restricted | Native broker | accessToken, refreshTokenExpires | connection.template(fieldName) |
+| google-email | Gmail | account:google-email | https://gmail.googleapis.com/gmail/v1/users/me/ | accessToken, refreshTokenExpires | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | telegram | Telegram Bot | account:telegram | https://api.telegram.org/bot{{connection.token}}/ | token | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | google-drive | Google Drive | account:google-custom, account:google-drive, account:google-restricted | https://www.googleapis.com/drive/v3/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | airtable | Airtable | account:airtable2, account:airtable3 | {{getBaseUrl(connection, 'api.airtable.com/v0')}} | accessToken, apiToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
@@ -262,6 +433,8 @@ return { sent: true };
 | together-ai | Together AI | account:together-ai | https://api.together.xyz/v1/ | apiKey | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | sap-s4hana | SAP S/4HANA | account:sap-s4hana | {{connection.host}}/sap/opu/odata{{switch(temp.odataVersion, '2', '', '4', '4', '')}}/sap | authHeader, cookie, csrfToken, host | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | xero | Xero | account:xero-event, account:xero3 | https://api.xero.com/api.xro/<br>https://api.xero.com/api.xro/2.0/ | accessToken, connections, tenantId | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| sage-accounting | Sage Business Cloud Accounting | account:sage-accounting | https://api.accounting.sage.com/v3.1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
+| sage-intacct | Sage Intacct | account:sage-intacct2 | https://api.intacct.com/ia/api/v1/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | bexio | Bexio | account:bexio | https://api.bexio.com/ | accessToken | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | boostspace | Boost.space | account:boostspace | https://{{connection.syskey}}.boost.space | syskey, token | connection.fetch(pathOrUrl, init?), connection.template(fieldName) |
 | magento | Magento | account:magento | Native broker | — | connection.template(fieldName) |
